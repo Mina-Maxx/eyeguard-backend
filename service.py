@@ -2,9 +2,15 @@
 # --------------------------------------------
 # EyeGuard Enrichment Service
 # FastAPI + Cache + Local DB + Range Alert + Decision + Alerts (Log/Webhook/SSE)
+# Returns FULL raw JSON from VT/AbuseIPDB/OTX beside summaries
+# Adds AUTOMATION RULES to trigger actions (block ip / webhook / tag_local)
 # --------------------------------------------
 
-import os, time, json, threading, asyncio
+import os
+import time
+import json
+import threading
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -53,7 +59,7 @@ ALERT_BUFFER: List[dict] = []
 ALERT_BUFFER_MAX = 500
 
 # ----------------- FastAPI
-app = FastAPI(title="EyeGuard Enrichment Service", version="0.3.0")
+app = FastAPI(title="EyeGuard Enrichment Service", version="0.5.0")
 
 # ----------------- Schemas
 class QueryRequest(BaseModel):
@@ -89,6 +95,7 @@ def load_cached(provider: str, key: str) -> Optional[dict]:
 
 def save_cache(provider: str, key: str, data: dict):
     p = cache_path(provider, key)
+    p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
@@ -100,9 +107,10 @@ def load_local_index():
         idx: Dict[str, Dict[str, Any]] = {}
         for _, r in df.iterrows():
             key = str(r.get("indicator", "")).strip()
-            if not key: continue
+            if not key:
+                continue
             idx[key] = {
-                "type":      str(r.get("type","")),
+                "type":      str(r.get("type", "")),
                 "label":     r.get("label"),
                 "score":     r.get("score"),
                 "notes":     r.get("notes"),
@@ -119,7 +127,8 @@ def local_lookup(indicator: str) -> Optional[dict]:
 
 def is_ip(s: str) -> bool:
     parts = s.split(".")
-    if len(parts) != 4: return False
+    if len(parts) != 4:
+        return False
     try:
         return all(0 <= int(p) < 256 for p in parts)
     except Exception:
@@ -128,13 +137,14 @@ def is_ip(s: str) -> bool:
 # ---- IP helpers for range alerts
 def ip_to_int(ip: str) -> int:
     try:
-        a,b,c,d = [int(x) for x in ip.split(".")]
-        return (a<<24) | (b<<16) | (c<<8) | d
+        a, b, c, d = [int(x) for x in ip.split(".")]
+        return (a << 24) | (b << 16) | (c << 8) | d
     except Exception:
         return -1
 
 def same_subnet(ip1: str, ip2: str, bits: int = RANGE_BITS) -> bool:
-    if not (is_ip(ip1) and is_ip(ip2)): return False
+    if not (is_ip(ip1) and is_ip(ip2)):
+        return False
     mask = (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF
     return (ip_to_int(ip1) & mask) == (ip_to_int(ip2) & mask)
 
@@ -174,13 +184,15 @@ def load_local_ranges() -> list:
     return nets
 
 # ----------------- Providers
+
 def vt_get(t: str, value: str, force_refresh: bool = False) -> Optional[dict]:
     if not VT_API_KEY:
         return None
     key = f"{t}_{value}"
     if not force_refresh:
         cached = load_cached("vt", key)
-        if cached: return cached
+        if cached:
+            return cached
     base = "https://www.virustotal.com/api/v3"
     if t == "file":
         endpoint = f"/files/{quote_plus(value)}"
@@ -190,50 +202,59 @@ def vt_get(t: str, value: str, force_refresh: bool = False) -> Optional[dict]:
         endpoint = f"/domains/{quote_plus(value)}"
     else:
         return None
-    r = requests.get(base+endpoint, headers={"x-apikey": VT_API_KEY}, timeout=30)
+    r = requests.get(base + endpoint, headers={"x-apikey": VT_API_KEY}, timeout=30)
     if r.status_code == 429:
         time.sleep(60)
-        r = requests.get(base+endpoint, headers={"x-apikey": VT_API_KEY}, timeout=30)
-    if r.status_code != 200: return None
+        r = requests.get(base + endpoint, headers={"x-apikey": VT_API_KEY}, timeout=30)
+    if r.status_code != 200:
+        return None
     data = r.json()
     save_cache("vt", key, data)
     time.sleep(RATE["vt"])
     return data
 
 def abuse_get_ip(ip: str, force_refresh: bool = False) -> Optional[dict]:
-    if not ABUSE_KEY: return None
+    if not ABUSE_KEY:
+        return None
     key = f"ip_{ip}"
     if not force_refresh:
         cached = load_cached("abuse", key)
-        if cached: return cached
+        if cached:
+            return cached
     url = "https://api.abuseipdb.com/api/v2/check"
     headers = {"Key": ABUSE_KEY, "Accept": "application/json"}
     params = {"ipAddress": ip, "maxAgeInDays": 90}
     r = requests.get(url, headers=headers, params=params, timeout=20)
-    if r.status_code != 200: return None
+    if r.status_code != 200:
+        return None
     data = r.json()
     save_cache("abuse", key, data)
     time.sleep(RATE["abuse"])
     return data
 
 def otx_get_ip(ip: str, force_refresh: bool = False) -> Optional[dict]:
-    if not OTX_KEY: return None
+    if not OTX_KEY:
+        return None
     key = f"ip_{ip}"
     if not force_refresh:
         cached = load_cached("otx", key)
-        if cached: return cached
+        if cached:
+            return cached
     url = f"https://otx.alienvault.com/api/v1/indicators/IPv4/{quote_plus(ip)}/general"
     headers = {"X-OTX-API-KEY": OTX_KEY}
     r = requests.get(url, headers=headers, timeout=20)
-    if r.status_code != 200: return None
+    if r.status_code != 200:
+        return None
     data = r.json()
     save_cache("otx", key, data)
     time.sleep(RATE["otx"])
     return data
 
 # ----------------- Summaries
+
 def summarize_vt(j: dict) -> dict:
-    if not j: return {}
+    if not j:
+        return {}
     d = j.get("data", {})
     a = d.get("attributes", {})
     stats = a.get("last_analysis_stats", {}) or {}
@@ -258,7 +279,8 @@ def summarize_vt(j: dict) -> dict:
     }
 
 def summarize_abuse(j: dict) -> dict:
-    if not j or "data" not in j: return {}
+    if not j or "data" not in j:
+        return {}
     d = j["data"]
     return {
         "abuse_confidence_score": d.get("abuseConfidenceScore"),
@@ -269,18 +291,20 @@ def summarize_abuse(j: dict) -> dict:
     }
 
 def summarize_otx(j: dict) -> dict:
-    if not j: return {}
+    if not j:
+        return {}
     return {
         "otx_reputation": j.get("reputation"),
         "otx_pulse_count": (j.get("pulse_info") or {}).get("count", 0),
     }
 
 # ----------------- Threat score + Decision
+
 def combined_threat_score(src: Dict[str, Any], local_hit: Optional[dict]) -> float:
     vt_mal = float((src.get("vt") or {}).get("last_analysis_stats", {}).get("malicious", 0))
     abuse_score = float((src.get("abuse") or {}).get("abuse_confidence_score") or 0)
     otx_pulses = float((src.get("otx") or {}).get("otx_pulse_count") or 0)
-    local_bonus = 20.0 if (local_hit and str(local_hit.get("label","")).lower() == "malicious") else 0.0
+    local_bonus = 20.0 if (local_hit and str(local_hit.get("label", "")).lower() == "malicious") else 0.0
     return (vt_mal * 2.0) + (abuse_score * 0.5) + (min(otx_pulses, 5) * 3.0) + local_bonus
 
 def decide_action(result: Dict[str, Any]) -> Dict[str, str]:
@@ -289,19 +313,20 @@ def decide_action(result: Dict[str, Any]) -> Dict[str, str]:
     vt_mal = int((result.get("sources", {}).get("vt") or {}).get("last_analysis_stats", {}).get("malicious", 0))
     abuse_score = float((result.get("sources", {}).get("abuse") or {}).get("abuse_confidence_score") or 0)
 
-    if local and str(local.get("label","")).lower() == "malicious":
-        return {"action":"block", "notes":"Local DB flags as malicious"}
+    if local and str(local.get("label", "")).lower() == "malicious":
+        return {"action": "block", "notes": "Local DB flags as malicious"}
     if vt_mal >= 5:
-        return {"action":"block", "notes":f"VT malicious count = {vt_mal}"}
+        return {"action": "block", "notes": f"VT malicious count = {vt_mal}"}
     if abuse_score >= 75:
-        return {"action":"alert", "notes":f"AbuseIPDB score = {abuse_score}"}
+        return {"action": "alert", "notes": f"AbuseIPDB score = {abuse_score}"}
     if ts >= 15:
-        return {"action":"alert", "notes":f"Composite threat_score = {ts}"}
+        return {"action": "alert", "notes": f"Composite threat_score = {ts}"}
     if ts >= 5:
-        return {"action":"monitor", "notes":f"Composite threat_score = {ts}"}
-    return {"action":"none", "notes":"No significant signals"}
+        return {"action": "monitor", "notes": f"Composite threat_score = {ts}"}
+    return {"action": "none", "notes": "No significant signals"}
 
 # ----------------- Alerts sink helpers
+
 def _append_alert_local(alert: dict):
     ALERTS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(ALERTS_LOG_PATH, "a", encoding="utf-8") as f:
@@ -324,24 +349,170 @@ def emit_alert_to_sinks(alert: dict):
     _append_alert_local(alert)
     _post_webhook(alert)
 
+# ----------------- Automation Engine (rules-based)
+AUTOMATION_RULES_PATH = BASE_DIR / "data/local/automation_rules.json"
+ENABLE_BLOCKING = os.getenv("EG_ENABLE_BLOCKING", "0") in ("1", "true", "True")
+
+class AutomationEngine:
+    def __init__(self):
+        self.rules: List[Dict[str, Any]] = []
+        self.load()
+
+    def load(self):
+        try:
+            if AUTOMATION_RULES_PATH.exists():
+                self.rules = json.load(open(AUTOMATION_RULES_PATH, "r", encoding="utf-8")) or []
+            else:
+                self.rules = []
+        except Exception:
+            self.rules = []
+
+    # -------------- Condition matching helpers
+    def _get(self, d, path, default=None):
+        cur = d
+        for k in path.split("."):
+            if not isinstance(cur, dict) or k not in cur:
+                return default
+            cur = cur[k]
+        return cur
+
+    def _ip_in_any_cidr(self, ip: str, cidrs: List[str]) -> bool:
+        for c in cidrs:
+            if cidr_contains(c, ip):
+                return True
+        return False
+
+    def _match_conditions(self, rule: Dict[str, Any], result: Dict[str, Any]) -> bool:
+        rtype = rule.get("type")
+        if rtype and rtype != result.get("type"):
+            return False
+
+        min_ts = rule.get("min_threat_score")
+        if min_ts is not None and float(result.get("threat_score", 0.0)) < float(min_ts):
+            return False
+
+        vt_min = rule.get("vt_min_malicious")
+        vt_mal = int(self._get(result, "sources.vt.last_analysis_stats.malicious", 0))
+        if vt_min is not None and vt_mal < int(vt_min):
+            return False
+
+        abuse_min = rule.get("abuse_min_score")
+        abuse = float(self._get(result, "sources.abuse.abuse_confidence_score", 0.0))
+        if abuse_min is not None and abuse < float(abuse_min):
+            return False
+
+        otx_min = rule.get("otx_min_pulses")
+        otx = int(self._get(result, "sources.otx.otx_pulse_count", 0))
+        if otx_min is not None and otx < int(otx_min):
+            return False
+
+        include_cidrs = rule.get("include_cidrs") or []
+        if include_cidrs and result.get("type") == "ip":
+            ip = result.get("indicator")
+            if not (ip and self._ip_in_any_cidr(ip, include_cidrs)):
+                return False
+
+        return True
+
+    # -------------- Actions
+    def _action_block_ip(self, ip: str):
+        if not ENABLE_BLOCKING:
+            return {"ok": False, "reason": "blocking disabled"}
+        try:
+            import subprocess
+            cmd = ["sudo", "iptables", "-I", "INPUT", "-s", ip, "-j", "DROP"]
+            subprocess.run(cmd, check=False)
+            save_flagged_ip(ip, "block", 0.0)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _action_webhook(self, payload: dict, url: Optional[str] = None):
+        try:
+            requests.post(url or DASHBOARD_WEBHOOK_URL, json=payload, timeout=10)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _action_tag_local(self, indicator: str, label: str = "blocked", score: float = 100.0):
+        try:
+            LOCAL_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+            hdr = "indicator,type,label,score,notes,timestamp\n"
+            line = f"{indicator},{'ip' if is_ip(indicator) else 'domain'},{label},{score},automation,{datetime.utcnow().isoformat()}Z\n"
+            if not LOCAL_DATA_PATH.exists():
+                with open(LOCAL_DATA_PATH, "w", encoding="utf-8") as f:
+                    f.write(hdr)
+                    f.write(line)
+            else:
+                with open(LOCAL_DATA_PATH, "a", encoding="utf-8") as f:
+                    f.write(line)
+            load_local_index()
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def run_actions(self, rule: Dict[str, Any], result: Dict[str, Any]):
+        out = []
+        actions = rule.get("actions") or []
+        ip = result.get("indicator") if result.get("type") == "ip" else None
+        for a in actions:
+            name = a.get("name")
+            if name == "block_ip" and ip:
+                out.append({"block_ip": self._action_block_ip(ip)})
+            elif name == "webhook":
+                url = a.get("url")
+                out.append({"webhook": self._action_webhook(result, url)})
+            elif name == "tag_local":
+                label = a.get("label", "blocked")
+                score = float(a.get("score", 100.0))
+                out.append({"tag_local": self._action_tag_local(result.get("indicator"), label, score)})
+        return out
+
+    def apply(self, enriched: Dict[str, Any]):
+        typ = enriched.get("type")
+        ind = enriched.get("indicator")
+        if not typ or not ind:
+            return []
+        executed = []
+        for rule in self.rules:
+            try:
+                if self._match_conditions(rule, enriched):
+                    executed.append({"rule": rule.get("name"), "actions": self.run_actions(rule, enriched)})
+            except Exception as e:
+                executed.append({"rule": rule.get("name"), "error": str(e)})
+        return executed
+
+automation = AutomationEngine()
+
 # ----------------- Core
+
 def handle_query(t: str, value: str, providers: List[str], force_refresh: bool):
-    result: Dict[str, Any] = {"local_hit": None, "sources": {}, "threat_score": 0.0}
+    result: Dict[str, Any] = {
+        "local_hit": None,
+        "sources": {},       # summaries
+        "raw_sources": {},   # full raw JSON per provider
+        "threat_score": 0.0,
+    }
 
     # 1) Local first
     local = local_lookup(value)
-    if local: result["local_hit"] = local
+    if local:
+        result["local_hit"] = local
 
     # 2) Providers
     if "vt" in providers:
         vt_json = vt_get(t, value, force_refresh=force_refresh)
+        result["raw_sources"]["vt"] = vt_json or {}
         result["sources"]["vt"] = summarize_vt(vt_json)
+
     if t == "ip":
         if "abuse" in providers:
             abuse_json = abuse_get_ip(value, force_refresh=force_refresh)
+            result["raw_sources"]["abuse"] = abuse_json or {}
             result["sources"]["abuse"] = summarize_abuse(abuse_json)
         if "otx" in providers:
             otx_json = otx_get_ip(value, force_refresh=force_refresh)
+            result["raw_sources"]["otx"] = otx_json or {}
             result["sources"]["otx"] = summarize_otx(otx_json)
 
     # 3) Score + decision
@@ -349,10 +520,19 @@ def handle_query(t: str, value: str, providers: List[str], force_refresh: bool):
     decision = decide_action(result)
     result.update(decision)
 
+    # 3.5) Automation (rules)
+    result_with_ctx = {**result, "type": t, "indicator": value}
+    try:
+        execs = automation.apply(result_with_ctx)
+        if execs:
+            result["automation"] = execs
+    except Exception as _e:
+        result["automation_error"] = str(_e)
+
     # 4) Range alerts (IP only)
     if t == "ip":
         ip_val = value
-        range_hit_info = {}
+        range_hit_info: Dict[str, Any] = {}
         flagged = load_flagged_ips()
         for item in flagged[-2000:]:
             bad_ip = item.get("ip")
@@ -371,20 +551,25 @@ def handle_query(t: str, value: str, providers: List[str], force_refresh: bool):
                     range_hit_info = {"type": "cidr_list", "cidr": cidr}
                     break
         if range_hit_info:
-            if result.get("action") in (None,"none","monitor") or not result.get("action"):
+            if result.get("action") in (None, "none", "monitor") or not result.get("action"):
                 result["action"] = "alert"
-                base_note = ("Same subnet as flagged IP"
-                             if range_hit_info.get("type")=="same_subnet"
-                             else f"In risky CIDR {range_hit_info.get('cidr')}")
+                base_note = (
+                    "Same subnet as flagged IP"
+                    if range_hit_info.get("type") == "same_subnet"
+                    else f"In risky CIDR {range_hit_info.get('cidr')}"
+                )
                 prev = result.get("notes", "")
                 extra = ""
                 if range_hit_info.get("matched_ip"):
-                    extra = f" (matched {range_hit_info['matched_ip']} action={range_hit_info.get('matched_action')})"
+                    extra = (
+                        f" (matched {range_hit_info['matched_ip']}"
+                        f" action={range_hit_info.get('matched_action')})"
+                    )
                 result["notes"] = (prev + " | " if prev else "") + base_note + extra
             result["range_alert"] = range_hit_info
 
     # 5) Persist flagged IPs for future range alerts
-    if t == "ip" and result.get("action") in ("block","alert"):
+    if t == "ip" and result.get("action") in ("block", "alert"):
         save_flagged_ip(value, result["action"], float(result.get("threat_score", 0.0)))
 
     # 6) Emit alert to sinks (webhook + local log)
@@ -398,13 +583,14 @@ def handle_query(t: str, value: str, providers: List[str], force_refresh: bool):
             "threat_score": result.get("threat_score"),
             "sources": result.get("sources", {}),
             "local_hit": result.get("local_hit"),
-            "range_alert": result.get("range_alert", None)
+            "range_alert": result.get("range_alert", None),
         }
         emit_alert_to_sinks(alert_payload)
 
     return result
 
 # ----------------- Endpoints
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -422,7 +608,7 @@ def get_keys_status():
 def get_alerts(limit: int = 100):
     data = list(ALERT_BUFFER)[-limit:][::-1]
     if not data and ALERTS_LOG_PATH.exists():
-        lines = []
+        lines: List[dict] = []
         with open(ALERTS_LOG_PATH, "r", encoding="utf-8") as f:
             for line in f:
                 try:
@@ -446,30 +632,40 @@ async def alerts_stream(request: Request):
             await asyncio.sleep(1)
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+# Automation endpoints
+@app.get("/automation/rules")
+def get_rules():
+    return {"ok": True, "count": len(automation.rules), "rules": automation.rules}
+
+@app.post("/automation/reload")
+def reload_rules():
+    automation.load()
+    return {"ok": True, "count": len(automation.rules)}
+
 @app.post("/query")
 def query_entity(q: QueryRequest):
     t = q.type.lower().strip()
     val = q.value.strip()
-    if t not in {"ip","file","domain"}:
-        raise HTTPException(400,"type must be one of: ip, file, domain")
+    if t not in {"ip", "file", "domain"}:
+        raise HTTPException(400, "type must be one of: ip, file, domain")
 
-    providers = q.providers or ["vt","abuse","otx"]
+    providers = q.providers or ["vt", "abuse", "otx"]
     providers = [
         p for p in providers
-        if not ((p=="vt" and not VT_API_KEY) or (p=="abuse" and not ABUSE_KEY) or (p=="otx" and not OTX_KEY))
+        if not ((p == "vt" and not VT_API_KEY) or (p == "abuse" and not ABUSE_KEY) or (p == "otx" and not OTX_KEY))
     ]
     try:
         res = handle_query(t, val, providers, q.force_refresh)
-        return {"ok": True,"used_providers": providers, **res}
+        return {"ok": True, "used_providers": providers, **res}
     except Exception as e:
         raise HTTPException(500, str(e))
 
 @app.post("/ingest")
 def ingest_flow(flow: IngestFlow):
-    providers = flow.providers or ["vt","abuse","otx"]
+    providers = flow.providers or ["vt", "abuse", "otx"]
     providers = [
         p for p in providers
-        if not ((p=="vt" and not VT_API_KEY) or (p=="abuse" and not ABUSE_KEY) or (p=="otx" and not OTX_KEY))
+        if not ((p == "vt" and not VT_API_KEY) or (p == "abuse" and not ABUSE_KEY) or (p == "otx" and not OTX_KEY))
     ]
     enriched: Dict[str, Any] = {}
     if flow.file_hash:
