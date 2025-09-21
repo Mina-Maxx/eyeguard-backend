@@ -1,0 +1,68 @@
+[
+  {
+    "name": "Block if VT very malicious",
+    "type": "ip",
+    "vt_min_malicious": 5,
+    "actions": [
+      {"name": "block_ip"},
+      {"name": "tag_local", "label": "blocked-vt", "score": 100},
+      {"name": "webhook"}
+    ]
+  },
+  {
+    "name": "Alert when AbuseIPDB very high",
+    "type": "ip",
+    "abuse_min_score": 90,
+    "actions": [
+      {"name": "webhook"},
+      {"name": "tag_local", "label": "high-abuse", "score": 90}
+    ]
+  },
+  {
+    "name": "Monitor if OTX pulses >= 3",
+    "type": "ip",
+    "otx_min_pulses": 3,
+    "actions": [
+      {"name": "webhook"},
+      {"name": "tag_local", "label": "otx-watch", "score": 60}
+    ]
+  },
+  {
+    "name": "Block if total threat_score very high",
+    "type": "ip",
+    "min_threat_score": 70,
+    "actions": [
+      {"name": "block_ip"},
+      {"name": "webhook"},
+      {"name": "tag_local", "label": "blocked-score", "score": 100}
+    ]
+  },
+  {
+    "name": "Special watch for our networks",
+    "type": "ip",
+    "min_threat_score": 10,
+    "include_cidrs": ["10.10.0.0/16", "192.168.1.0/24"],
+    "actions": [
+      {"name": "webhook"},
+      {"name": "tag_local", "label": "internal-suspicious", "score": 80}
+    ]
+  },
+  {
+    "name": "Domain flagged in VT",
+    "type": "domain",
+    "vt_min_malicious": 3,
+    "actions": [
+      {"name": "webhook"},
+      {"name": "tag_local", "label": "malicious-domain", "score": 90}
+    ]
+  },
+  {
+    "name": "File hash malicious in VT",
+    "type": "file",
+    "vt_min_malicious": 2,
+    "actions": [
+      {"name": "webhook"},
+      {"name": "tag_local", "label": "malicious-file", "score": 95}
+    ]
+  }
+]
